@@ -9,19 +9,8 @@ from typing import Dict, Optional
 from dotenv import load_dotenv
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
-import os
-import sys
-import time
-import logging
-import random
-import re
-from datetime import datetime, timedelta
-from typing import Dict, Optional
-from dotenv import load_dotenv
-from tqdm import tqdm
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from rich.console import Console
+from rich.logging import RichHandler
 from bs4 import BeautifulSoup
 from ia_s3_client import IAS3Client
 from url_generator import MingPaoUrlGenerator
@@ -29,6 +18,25 @@ from database import ArchiveDB
 
 # Rich console for pretty output
 console = Console()
+
+def extract_article_title(content: bytes) -> Optional[str]:
+    """Extract the article title from HTML content."""
+    try:
+        soup = BeautifulSoup(content, 'html.parser')
+        title_tag = soup.find('title')
+        if title_tag and title_tag.string:
+            # Clean up the title
+            title = title_tag.string.strip()
+            # Remove common prefixes like "Ming Pao - " if present
+            if ' - ' in title:
+                parts = title.split(' - ')
+                # Return the main part, usually the article title
+                return parts[0].strip() if parts else title
+            return title
+        return None
+    except Exception as e:
+        logger.warning(f"Failed to extract title from content: {e}")
+        return None
 
 # Configure root logger to use Rich
 logging.basicConfig(
@@ -153,10 +161,10 @@ def generate_index_html(bucket_id: str, articles: Dict[str, list], titles: Optio
     ]
     
     for date in sorted(articles.keys()):
-        html_parts.append(f'''    <div class="date-section">''')
-        html_parts.append(f'''        <h2>{date}</h2>''')
-        html_parts.append(f'''        <ul class="article-list">''')
-        
+        html_parts.append('    <div class="date-section">')
+        html_parts.append(f'        <h2>{date}</h2>')
+        html_parts.append('        <ul class="article-list">')
+
         for filename in sorted(articles[date]):
             # Format: 20250101/HK-gaa1_r.htm
             article_title = titles.get(filename, "")
@@ -166,9 +174,9 @@ def generate_index_html(bucket_id: str, articles: Dict[str, list], titles: Optio
                 f'            <li><a href="{filename}" target="_blank">{display_name}</a> '
                 f'<span class="article-date">({safe_name})</span></li>'
             )
-        
-        html_parts.append(f'        </ul>')
-        html_parts.append(f'    </div>')
+
+        html_parts.append('        </ul>')
+        html_parts.append('    </div>')
     
     html_parts.extend([
         '    <hr>',
@@ -233,9 +241,7 @@ def main():
     access_key = os.getenv("IA_ACCESS_KEY")
     secret_key = os.getenv("IA_SECRET_KEY")
     prefix = os.getenv("IA_IDENTIFIER_PREFIX", "mingpao-canada-hk-news")
-    max_workers = int(os.getenv("MAX_WORKERS", "5"))
-    verify_uploads = os.getenv("VERIFY_UPLOADS", "false").lower() == "true"
-    
+
     if not access_key or not secret_key:
         logger.error("IA_ACCESS_KEY and IA_SECRET_KEY must be set in .env file")
         return
@@ -264,10 +270,9 @@ def main():
     
     current_date = start_date
     articles_by_month = {}  # Track articles by month for index generation
-    
+
     # Process dates in parallel for better performance
     # But limit concurrency to avoid overwhelming IA
-    from concurrent.futures import ThreadPoolExecutor, as_completed
     dates_to_process = []
     temp_date = start_date
     while temp_date <= end_date:
@@ -297,81 +302,29 @@ def main():
         if urls_to_process:
             with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
                 futures = {
-                    executor.submit(archive_article, url, ia_client, bucket_id, db, 
-                                        max_retries=max_retries_per_article, verify_upload=verify_uploads)
+                    executor.submit(archive_article, url, ia_client, bucket_id, db,
+                                        max_retries=MAX_RETRIES_PER_ARTICLE, verify_upload=VERIFY_UPLOADS)
                     for url in urls_to_process
                 }
-                
+
                 for future in tqdm(as_completed(futures), total=len(futures), desc=f"Archiving {date_str}"):
                     if future.result():
                         count += 1
-        
+
         # Track articles for this month
         if bucket_id not in articles_by_month:
             articles_by_month[bucket_id] = {}
         if date_str not in articles_by_month[bucket_id]:
             articles_by_month[bucket_id][date_str] = []
-        
+
         # Add articles from this date to the tracking
         for url in urls_to_process:
             match = re.search(r'News/(\d{8}/HK-[^/]+_r\.htm)', url)
             if match:
                 articles_by_month[bucket_id][date_str].append(match.group(1))
-        
-        console.print(f"  ✅ Completed {date_str}: {count} articles processed in {now.strftime('%H:%M:%S')}", style="blue")
-        
-        # Move to next date
-        temp_date += timedelta(days=1)
-        date_str = current_date.strftime("%Y%m%d")
-        # Calculate monthly bucket ID
-        bucket_id = f"{prefix}-{current_date.year}-{current_date.month:02d}"
-        
-        logger.info(f"Processing date: {date_str} -> Bucket: {bucket_id}")
-        
-        urls = url_gen.get_article_urls(current_date)
-            # Filter out already archived to avoid overhead
-        # For optimization: get only once and cache if large dataset
-        if len(db.get_archived_urls()) > 10000:
-            logger.info("Large dataset detected, using cached archived URLs for filtering")
-            archived_urls_set = set(db.get_archived_urls())
-            urls_to_process = [u for u in urls if u not in archived_urls_set]
-        else:
-            archived_urls = db.get_archived_urls()
-            urls_to_process = [u for u in urls if u not in archived_urls]
-        
-        logger.info(f"Found {len(urls)} possible articles for {date_str} ({len(urls_to_process)} to process)")
-        
-        # Track overall progress
-        total_urls_to_process = 0
-        total_articles_processed = 0
-        
-        count = 0
-        if urls_to_process:
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = {
-                    executor.submit(archive_article, url, ia_client, bucket_id, db, verify_upload=verify_uploads): url 
-                    for url in urls_to_process
-                }
-                
-                for future in tqdm(as_completed(futures), total=len(futures), desc=f"Archiving {date_str}"):
-                    if future.result():
-                        count += 1
-        
-        # Track articles for this month
-        if bucket_id not in articles_by_month:
-            articles_by_month[bucket_id] = {}
-        if date_str not in articles_by_month[bucket_id]:
-            articles_by_month[bucket_id][date_str] = []
-        
-        # Add articles from this date to the tracking
-        for url in urls_to_process:
-            match = re.search(r'News/(\d{8}/HK-[^/]+_r\.htm)', url)
-            if match:
-                articles_by_month[bucket_id][date_str].append(match.group(1))
-        
-            now = datetime.now()
-            current_date += timedelta(days=1)
-            console.print(f"  ✅ Completed {date_str}: {count} articles processed in {now.strftime('%H:%M:%S')}", style="blue")
+
+        now = datetime.now()
+        console.print(f"  ✅ Completed {date_str}: {count} articles processed at {now.strftime('%H:%M:%S')}", style="green")
     
     # Generate and upload index.html for each month
     for bucket_id, articles_by_date in articles_by_month.items():
