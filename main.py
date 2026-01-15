@@ -173,10 +173,18 @@ def health_check(ia_client: IAS3Client) -> bool:
     
     # Check Ming Pao website connectivity
     try:
-        response = requests.head("http://www.mingpaocanada.com/tor/htm/responsive/archiveList.cfm", 
-                               timeout=10, allow_redirects=True)
-        if response.status_code < 500:
+        # Test a specific known recent article to avoid redirects
+        test_url = "http://www.mingpaocanada.com/tor/htm/News/20250101/HK-gaa1_r.htm"
+        response = requests.head(test_url, timeout=10, allow_redirects=False)
+        
+        # Ming Pao redirects missing articles to errorpage.html (HTTP 302)
+        # This is expected behavior for some articles
+        if response.status_code in [200, 302, 404]:
             logger.info("✓ Ming Pao Canada website is reachable")
+            return True
+        elif response.status_code < 500:
+            logger.info("✓ Ming Pao Canada website is reachable")
+            return True
         else:
             logger.warning(f"✗ Ming Pao Canada returned status {response.status_code}")
             return False
