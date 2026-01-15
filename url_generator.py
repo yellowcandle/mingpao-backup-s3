@@ -1,6 +1,8 @@
 import requests
 import re
 import logging
+import time
+import random
 from datetime import datetime
 from typing import List, Set
 
@@ -30,32 +32,41 @@ class MingPaoUrlGenerator:
             urls = self._generate_bruteforce(target_date)
         return urls
 
-    def _discover_from_index(self, target_date: datetime) -> List[str]:
+    def _discover_from_index(self, target_date: datetime, max_retries: int = 3) -> List[str]:
         date_str = target_date.strftime("%Y%m%d")
         index_url = f"{self.BASE_URL}/htm/News/{date_str}/HK-GAindex_r.htm"
         
-        try:
-            response = requests.get(index_url, headers=self.headers, timeout=self.timeout)
-            if response.status_code != 200:
-                return []
-            
-            article_urls = set()
-            pattern = r'href="([^"]*htm/News/\d{8}/HK-[^"]+_r\.htm)"'
-            matches = re.findall(pattern, response.text)
-            
-            for relative_path in matches:
-                if "index" in relative_path.lower():
-                    continue
-                clean_path = relative_path.replace("../../../", "")
-                if f"News/{date_str}/" not in clean_path:
-                    continue
-                absolute_url = f"{self.BASE_URL}/{clean_path}"
-                article_urls.add(absolute_url)
+        for attempt in range(max_retries + 1):
+            try:
+                response = requests.get(index_url, headers=self.headers, timeout=self.timeout)
+                if response.status_code == 404:
+                    return []
+                if response.status_code != 200:
+                    raise requests.exceptions.RequestException(f"HTTP {response.status_code}")
                 
-            return sorted(list(article_urls))
-        except Exception as e:
-            logger.warning(f"Failed to discover from index {index_url}: {e}")
-            return []
+                article_urls = set()
+                pattern = r'href="([^"]*htm/News/\d{8}/HK-[^"]+_r\.htm)"'
+                matches = re.findall(pattern, response.text)
+                
+                for relative_path in matches:
+                    if "index" in relative_path.lower():
+                        continue
+                    clean_path = relative_path.replace("../../../", "")
+                    if f"News/{date_str}/" not in clean_path:
+                        continue
+                    absolute_url = f"{self.BASE_URL}/{clean_path}"
+                    article_urls.add(absolute_url)
+                    
+                return sorted(list(article_urls))
+            except (requests.exceptions.RequestException, Exception) as e:
+                if attempt < max_retries:
+                    wait_time = (2 ** attempt) + random.random()
+                    logger.warning(f"Attempt {attempt+1} failed for index {index_url}: {e}. Retrying in {wait_time:.2f}s...")
+                    time.sleep(wait_time)
+                else:
+                    logger.warning(f"Failed to discover from index {index_url} after {max_retries+1} attempts: {e}")
+        
+        return []
 
     def _generate_bruteforce(self, target_date: datetime) -> List[str]:
         date_str = target_date.strftime("%Y%m%d")

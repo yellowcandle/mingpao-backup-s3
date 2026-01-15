@@ -3,6 +3,7 @@ import time
 import logging
 import requests
 import re
+import random
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from tqdm import tqdm
@@ -23,37 +24,52 @@ logging.basicConfig(
 )
 logger = logging.getLogger("mingpao_ia_backup")
 
-def archive_article(url: str, ia_client: IAS3Client, bucket: str, db: ArchiveDB):
-    """Fetch article and upload to IA."""
+import random
+
+def archive_article(url: str, ia_client: IAS3Client, bucket: str, db: ArchiveDB, max_retries: int = 3):
+    """Fetch article and upload to IA with retry logic."""
     if db.is_archived(url):
-        # logger.debug(f"Skipping already archived: {url}")
         return True
 
     # Generate a safe key for IA
-    # Example: https://www.mingpaocanada.com/tor/htm/News/20250112/HK-gaa1_r.htm
-    # Key: 20250112/HK-gaa1_r.htm
     match = re.search(r'News/(\d{8}/HK-[^/]+_r\.htm)', url)
     if match:
         key = match.group(1)
     else:
-        # Fallback to last parts of URL
         key = "/".join(url.split("/")[-2:])
 
+    content = None
+    for attempt in range(max_retries + 1):
+        try:
+            response = requests.get(url, timeout=30, headers={
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            })
+            if response.status_code == 200:
+                content = response.content
+                break
+            elif response.status_code == 404:
+                # logger.debug(f"Article not found (404): {url}")
+                return False
+            else:
+                logger.warning(f"Attempt {attempt+1} failed for {url}: HTTP {response.status_code}")
+        except (requests.exceptions.RequestException, Exception) as e:
+            if attempt < max_retries:
+                wait_time = (2 ** attempt) + random.random()
+                logger.warning(f"Attempt {attempt+1} failed for {url}: {e}. Retrying in {wait_time:.2f}s...")
+                time.sleep(wait_time)
+            else:
+                logger.error(f"Failed to fetch {url} after {max_retries+1} attempts: {e}")
+                return False
+
+    if not content:
+        return False
+
     try:
-        response = requests.get(url, timeout=30, headers={
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"
-        })
-        if response.status_code != 200:
-            logger.error(f"Failed to fetch {url}: {response.status_code}")
-            return False
-        
-        content = response.content
-        
         # IA Metadata
         metadata = {
             "mediatype": "texts",
             "originalurl": url,
-            "subject": "Ming Pao Canada; Archive; News",
+            "subject": "Ming Pao Canada; Archive; News; Hong Kong",
             "date": key.split('/')[0] if '/' in key else datetime.now().strftime("%Y%m%d")
         }
         
@@ -62,7 +78,7 @@ def archive_article(url: str, ia_client: IAS3Client, bucket: str, db: ArchiveDB)
             db.record_upload(url, bucket, key)
             return True
     except Exception as e:
-        logger.error(f"Error archiving {url}: {e}")
+        logger.error(f"Error uploading {url} to IA: {e}")
         return False
 
 def main():
