@@ -156,9 +156,9 @@ def generate_index_html(bucket_id: str, articles: Dict[str, list], titles: Optio
     ]
     
     for date in sorted(articles.keys()):
-        html_parts.append(f'    <div class="date-section">')
-        html_parts.append(f'        <h2>{date}</h2>')
-        html_parts.append(f'        <ul class="article-list">')
+        html_parts.append(f'''    <div class="date-section">''')
+        html_parts.append(f'''        <h2>{date}</h2>''')
+        html_parts.append(f'''        <ul class="article-list">''')
         
         for filename in sorted(articles[date]):
             # Format: 20250101/HK-gaa1_r.htm

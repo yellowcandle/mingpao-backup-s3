@@ -2,10 +2,12 @@ import requests
 import logging
 import re
 import json
-from typing import Dict, Optional, Any
-from urllib.parse import quote, urlencode
+from typing import Dict, Optional
+from urllib.parse import quote
+
 
 logger = logging.getLogger(__name__)
+
 
 class IAS3Client:
     """
@@ -63,7 +65,7 @@ class IAS3Client:
             content: Raw bytes to upload
             content_type: MIME type
             metadata: Optional IA metadata headers (x-archive-meta-*)
-            max_retries: Number of retries for transient failures (500 errors)
+            max_retries: Number of retries for transient failures
         """
         import time
         import random
@@ -205,7 +207,6 @@ class IAS3Client:
             max_retries: Number of retries for transient failures (reduced to avoid slowdown)
         """
         import time
-        import random
         
         if not title:
             return True  # Nothing to update
@@ -244,8 +245,8 @@ class IAS3Client:
                         if "no changes" in error.lower():
                             logger.debug(f"No metadata changes needed for {filename}")
                             return True
-                        logger.debug(f"Metadata update info for {filename}: {error}")
-                        return True  # Don't fail - file is still archived
+                        logger.warning(f"Metadata update failed for {filename}: {error}")
+                        return True
                 elif response.status_code == 400:
                     # 400 means file not found in metadata yet (eventual consistency issue)
                     # This is temporary and will resolve later, so just log and continue

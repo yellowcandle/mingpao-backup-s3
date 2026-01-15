@@ -1,5 +1,14 @@
-def health_check(ia_client: IAS3Client) -> bool:
+import logging
+import requests
+from rich.console import Console
+
+# Use standard logger (no Rich needed here)
+logger = logging.getLogger("mingpao_ia_backup")
+
+def health_check(ia_client) -> bool:
     """Perform health checks before starting the backup."""
+    console = Console()
+    
     console.print("⏳ Running health checks...", style="bold cyan")
     
     # Check IA connectivity and credentials
@@ -23,7 +32,7 @@ def health_check(ia_client: IAS3Client) -> bool:
             console.print("  ✅ Ming Pao Canada website is reachable", style="green")
             return True
         else:
-            console.print(f"  ⚠️ Ming Pao Canada returned status {response.status_code}", style="yellow")
+            console.print(f"  ⚠️  Ming Pao Canada returned status {response.status_code}", style="yellow")
             return False
     except Exception as e:
         console.print(f"  ❌ Ming Pao Canada website unreachable: {e}", style="red")
