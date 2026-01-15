@@ -308,67 +308,69 @@ def main():
     current_date = start_date
     articles_by_month = {}  # Track articles by month for index generation
 
-    # Process dates in parallel for better performance
-    # But limit concurrency to avoid overwhelming IA
-    dates_to_process = []
-    temp_date = start_date
-    while temp_date <= end_date:
-        dates_to_process.append(temp_date)
-        temp_date += timedelta(days=1)
-        # Break if we have accumulated too many dates
-        if len(dates_to_process) >= 30:
-            break
+    current_date = start_date
+    total_dates_processed = 0
     
-    logger.info(f"Processing {len(dates_to_process)} dates in parallel (max {MAX_WORKERS} concurrent)")
-    
-    for current_date in dates_to_process:
-        date_str = current_date.strftime("%Y%m%d")
-        # Calculate monthly bucket ID
-        bucket_id = f"{prefix}-{current_date.year}-{current_date.month:02d}"
+    while current_date <= end_date:
+        dates_to_process = []
+        batch_end_date = current_date
+        while len(dates_to_process) < 30 and batch_end_date <= end_date:
+            dates_to_process.append(batch_end_date)
+            batch_end_date += timedelta(days=1)
         
-        console.print(f"📅 Processing date: {date_str} → Bucket: {bucket_id}", style="blue")
+        logger.info(f"Processing batch of {len(dates_to_process)} dates in parallel (max {MAX_WORKERS} concurrent)")
+        total_dates_processed += len(dates_to_process)
         
-        urls = url_gen.get_article_urls(current_date)
-        # Filter out already archived to avoid overhead
-        archived_urls = db.get_archived_urls()
-        urls_to_process = [u for u in urls if u not in archived_urls]
-        
-        console.print(f"📊 Found {len(urls)} articles for {date_str} ({len(urls_to_process)} new)", style="cyan")
-        
-        count = 0
-        if urls_to_process:
-            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-                futures = {
-                    executor.submit(archive_article, url, ia_client, bucket_id, db,
-                                        max_retries=MAX_RETRIES_PER_ARTICLE,
-                                        verify_upload=VERIFY_UPLOADS,
-                                        metadata_queue=metadata_queue)
-                    for url in urls_to_process
-                }
+        for current_date in dates_to_process:
+            date_str = current_date.strftime("%Y%m%d")
+            bucket_id = f"{prefix}-{current_date.year}-{current_date.month:02d}"
+            
+            console.print(f"📅 Processing date: {date_str} → Bucket: {bucket_id}", style="blue")
+            
+            urls = url_gen.get_article_urls(current_date)
+            archived_urls = db.get_archived_urls()
+            urls_to_process = [u for u in urls if u not in archived_urls]
+            
+            console.print(f"📊 Found {len(urls)} articles for {date_str} ({len(urls_to_process)} new)", style="cyan")
+            
+            count = 0
+            if urls_to_process:
+                with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                    futures = {
+                        executor.submit(archive_article, url, ia_client, bucket_id, db,
+                                            max_retries=MAX_RETRIES_PER_ARTICLE,
+                                            verify_upload=VERIFY_UPLOADS,
+                                            metadata_queue=metadata_queue)
+                        for url in urls_to_process
+                    }
 
-                for future in tqdm(as_completed(futures), total=len(futures), desc=f"Archiving {date_str}"):
-                    if future.result():
-                        count += 1
+                    for future in tqdm(as_completed(futures), total=len(futures), desc=f"Archiving {date_str}"):
+                        if future.result():
+                            count += 1
 
-        # Display queue status
-        queue_size = metadata_queue.qsize()
-        if queue_size > 0:
-            console.print(f"  📝 Metadata queue: {queue_size} pending updates", style="dim")
+            # Display queue status
+            queue_size = metadata_queue.qsize()
+            if queue_size > 0:
+                console.print(f"  📝 Metadata queue: {queue_size} pending updates", style="dim")
 
-        # Track articles for this month
-        if bucket_id not in articles_by_month:
-            articles_by_month[bucket_id] = {}
-        if date_str not in articles_by_month[bucket_id]:
-            articles_by_month[bucket_id][date_str] = []
+            # Track articles for this month
+            if bucket_id not in articles_by_month:
+                articles_by_month[bucket_id] = {}
+            if date_str not in articles_by_month[bucket_id]:
+                articles_by_month[bucket_id][date_str] = []
 
-        # Add articles from this date to the tracking
-        for url in urls_to_process:
-            match = re.search(r'News/(\d{8}/HK-[^/]+_r\.htm)', url)
-            if match:
-                articles_by_month[bucket_id][date_str].append(match.group(1))
+            # Add articles from this date to the tracking
+            for url in urls_to_process:
+                match = re.search(r'News/(\d{8}/HK-[^/]+_r\.htm)', url)
+                if match:
+                    articles_by_month[bucket_id][date_str].append(match.group(1))
 
-        now = datetime.now()
-        console.print(f"  ✅ Completed {date_str}: {count} articles processed at {now.strftime('%H:%M:%S')}", style="green")
+            now = datetime.now()
+            console.print(f"  ✅ Completed {date_str}: {count} articles processed at {now.strftime('%H:%M:%S')}", style="green")
+
+        current_date = batch_end_date
+
+    logger.info(f"Completed processing {total_dates_processed} dates from {start_date_str} to {end_date_str}")
 
     # Shutdown metadata worker gracefully
     logger.info("Waiting for pending metadata updates to complete...")
