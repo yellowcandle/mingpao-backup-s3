@@ -228,7 +228,10 @@ def health_check(ia_client: IAS3Client) -> bool:
     return True
 
 def main():
-    load_dotenv(override=True)  # Allow .env to override existing env vars
+    # Clear env vars set by Dockerfile so .env can override them
+    for key in ['START_DATE', 'END_DATE']:
+        os.environ.pop(key, None)
+    load_dotenv()  # Load from .env file
     
     access_key = os.getenv("IA_ACCESS_KEY")
     secret_key = os.getenv("IA_SECRET_KEY")
