@@ -10,38 +10,35 @@ from dotenv import load_dotenv
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import os
+import sys
+import time
+import logging
+import random
+import re
+from datetime import datetime, timedelta
+from typing import Dict, Optional
+from dotenv import load_dotenv
+from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from rich.console import Console
 from bs4 import BeautifulSoup
 from ia_s3_client import IAS3Client
 from url_generator import MingPaoUrlGenerator
 from database import ArchiveDB
 
+# Rich console for pretty output
+console = Console()
 
-def extract_article_title(content: bytes) -> str:
-    """Extract article title from HTML content (Big5-HKSCS encoded)."""
-    try:
-        # Ming Pao uses Big5-HKSCS encoding
-        decoded_content = content.decode('big5hkscs', errors='replace')
-        soup = BeautifulSoup(decoded_content, 'html.parser')
-        title_tag = soup.find('h3', class_='article-title')
-        if title_tag:
-            return title_tag.get_text().strip()
-        # Fallback: try <title> tag
-        title_tag = soup.find('title')
-        if title_tag:
-            return title_tag.get_text().strip()
-        return ""
-    except Exception:
-        return ""
-
-# Setup logging
+# Configure root logger to use Rich
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("data/archive.log"),
-        logging.StreamHandler()
-    ]
+    format='%(message)s',
+    handlers=[RichHandler(console=console, rich_tracebacks=True, show_time=False, show_path=False)],
+    force=True,
 )
+
+# Get module logger
 logger = logging.getLogger("mingpao_ia_backup")
 
 def archive_article(url: str, ia_client: IAS3Client, bucket: str, db: ArchiveDB, 
@@ -260,10 +257,71 @@ def main():
     start_date = datetime.strptime(start_date_str, "%Y%m%d")
     end_date = datetime.strptime(end_date_str, "%Y%m%d")
     
+    # Performance and concurrency settings
+    MAX_WORKERS = int(os.getenv("MAX_WORKERS", "2"))  # Default: 2 workers for parallel processing
+    MAX_RETRIES_PER_ARTICLE = int(os.getenv("MAX_RETRIES_PER_ARTICLE", "3"))  # Default: 3 retries per article
+    VERIFY_UPLOADS = os.getenv("VERIFY_UPLOADS", "false").lower() == "true"  # Default: don't verify (faster)
+    
     current_date = start_date
     articles_by_month = {}  # Track articles by month for index generation
     
-    while current_date <= end_date:
+    # Process dates in parallel for better performance
+    # But limit concurrency to avoid overwhelming IA
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    dates_to_process = []
+    temp_date = start_date
+    while temp_date <= end_date:
+        dates_to_process.append(temp_date)
+        temp_date += timedelta(days=1)
+        # Break if we have accumulated too many dates
+        if len(dates_to_process) >= 30:
+            break
+    
+    logger.info(f"Processing {len(dates_to_process)} dates in parallel (max {MAX_WORKERS} concurrent)")
+    
+    for current_date in dates_to_process:
+        date_str = current_date.strftime("%Y%m%d")
+        # Calculate monthly bucket ID
+        bucket_id = f"{prefix}-{current_date.year}-{current_date.month:02d}"
+        
+        console.print(f"📅 Processing date: {date_str} → Bucket: {bucket_id}", style="blue")
+        
+        urls = url_gen.get_article_urls(current_date)
+        # Filter out already archived to avoid overhead
+        archived_urls = db.get_archived_urls()
+        urls_to_process = [u for u in urls if u not in archived_urls]
+        
+        console.print(f"📊 Found {len(urls)} articles for {date_str} ({len(urls_to_process)} new)", style="cyan")
+        
+        count = 0
+        if urls_to_process:
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                futures = {
+                    executor.submit(archive_article, url, ia_client, bucket_id, db, 
+                                        max_retries=max_retries_per_article, verify_upload=verify_uploads)
+                    for url in urls_to_process
+                }
+                
+                for future in tqdm(as_completed(futures), total=len(futures), desc=f"Archiving {date_str}"):
+                    if future.result():
+                        count += 1
+        
+        # Track articles for this month
+        if bucket_id not in articles_by_month:
+            articles_by_month[bucket_id] = {}
+        if date_str not in articles_by_month[bucket_id]:
+            articles_by_month[bucket_id][date_str] = []
+        
+        # Add articles from this date to the tracking
+        for url in urls_to_process:
+            match = re.search(r'News/(\d{8}/HK-[^/]+_r\.htm)', url)
+            if match:
+                articles_by_month[bucket_id][date_str].append(match.group(1))
+        
+        console.print(f"  ✅ Completed {date_str}: {count} articles processed in {now.strftime('%H:%M:%S')}", style="blue")
+        
+        # Move to next date
+        temp_date += timedelta(days=1)
         date_str = current_date.strftime("%Y%m%d")
         # Calculate monthly bucket ID
         bucket_id = f"{prefix}-{current_date.year}-{current_date.month:02d}"
@@ -271,11 +329,21 @@ def main():
         logger.info(f"Processing date: {date_str} -> Bucket: {bucket_id}")
         
         urls = url_gen.get_article_urls(current_date)
-        # Filter out already archived to avoid overhead
-        archived_urls = db.get_archived_urls()
-        urls_to_process = [u for u in urls if u not in archived_urls]
+            # Filter out already archived to avoid overhead
+        # For optimization: get only once and cache if large dataset
+        if len(db.get_archived_urls()) > 10000:
+            logger.info("Large dataset detected, using cached archived URLs for filtering")
+            archived_urls_set = set(db.get_archived_urls())
+            urls_to_process = [u for u in urls if u not in archived_urls_set]
+        else:
+            archived_urls = db.get_archived_urls()
+            urls_to_process = [u for u in urls if u not in archived_urls]
         
         logger.info(f"Found {len(urls)} possible articles for {date_str} ({len(urls_to_process)} to process)")
+        
+        # Track overall progress
+        total_urls_to_process = 0
+        total_articles_processed = 0
         
         count = 0
         if urls_to_process:
@@ -301,7 +369,7 @@ def main():
             if match:
                 articles_by_month[bucket_id][date_str].append(match.group(1))
         
-            now = datetime.now(ZoneInfo("UTC"))
+            now = datetime.now()
             current_date += timedelta(days=1)
             console.print(f"  ✅ Completed {date_str}: {count} articles processed in {now.strftime('%H:%M:%S')}", style="blue")
     
