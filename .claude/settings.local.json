@@ -1,7 +1,11 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(ls:*)",
+      "Bash(ruff check:*)",
+      "Bash(docker info:*)",
+      "Bash(chmod:*)"
     ]
   }
 }

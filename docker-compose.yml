@@ -3,7 +3,7 @@ services:
     build: .
     volumes:
       - ./data:/app/data
-      # Mount .env if you want to use local settings, 
+      # Mount .env if you want to use local settings,
       # or define environment variables here directly.
       - ./.env:/app/.env:ro
     environment:

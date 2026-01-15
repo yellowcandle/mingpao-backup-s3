@@ -4,6 +4,8 @@ import logging
 import requests
 import re
 import random
+import queue
+import threading
 from datetime import datetime, timedelta
 from typing import Dict, Optional
 from dotenv import load_dotenv
@@ -49,8 +51,9 @@ logging.basicConfig(
 # Get module logger
 logger = logging.getLogger("mingpao_ia_backup")
 
-def archive_article(url: str, ia_client: IAS3Client, bucket: str, db: ArchiveDB, 
-                   max_retries: int = 3, verify_upload: bool = False):
+def archive_article(url: str, ia_client: IAS3Client, bucket: str, db: ArchiveDB,
+                   max_retries: int = 3, verify_upload: bool = False,
+                   metadata_queue: Optional[queue.Queue] = None):
     """Fetch article and upload to IA with retry logic and optional verification."""
     if db.is_archived(url):
         return True
@@ -115,10 +118,14 @@ def archive_article(url: str, ia_client: IAS3Client, bucket: str, db: ArchiveDB,
                     logger.warning(f"Upload succeeded but verification failed for {key}")
                     return False
             
-            # Update per-file metadata with article title
-            if title:
-                ia_client.update_file_metadata(bucket, key, title)
-            
+            # Queue metadata update for background processing
+            if title and metadata_queue:
+                try:
+                    # Non-blocking put with 1 second timeout
+                    metadata_queue.put((bucket, key, title), block=True, timeout=1.0)
+                except queue.Full:
+                    logger.warning(f"Metadata queue full, dropping update for {key}")
+
             db.record_upload(url, bucket, key, title)
             return True
     except Exception as e:
@@ -267,7 +274,37 @@ def main():
     MAX_WORKERS = int(os.getenv("MAX_WORKERS", "2"))  # Default: 2 workers for parallel processing
     MAX_RETRIES_PER_ARTICLE = int(os.getenv("MAX_RETRIES_PER_ARTICLE", "3"))  # Default: 3 retries per article
     VERIFY_UPLOADS = os.getenv("VERIFY_UPLOADS", "false").lower() == "true"  # Default: don't verify (faster)
-    
+
+    # Metadata worker function for background processing
+    def metadata_worker(q, ia_client):
+        """Background thread that processes metadata updates."""
+        while True:
+            item = q.get()
+            if item is None:  # Sentinel value for shutdown
+                q.task_done()
+                break
+
+            bucket, key, title = item
+            try:
+                ia_client.update_file_metadata(bucket, key, title)
+            except Exception as e:
+                logger.error(f"Metadata worker error for {key}: {e}")
+            finally:
+                q.task_done()
+
+    # Create metadata queue (bounded to 200 items)
+    metadata_queue = queue.Queue(maxsize=200)
+
+    # Start background metadata worker thread
+    metadata_thread = threading.Thread(
+        target=metadata_worker,
+        args=(metadata_queue, ia_client),
+        daemon=False,
+        name="MetadataWorker"
+    )
+    metadata_thread.start()
+    logger.info("Started background metadata worker thread")
+
     current_date = start_date
     articles_by_month = {}  # Track articles by month for index generation
 
@@ -303,13 +340,20 @@ def main():
             with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
                 futures = {
                     executor.submit(archive_article, url, ia_client, bucket_id, db,
-                                        max_retries=MAX_RETRIES_PER_ARTICLE, verify_upload=VERIFY_UPLOADS)
+                                        max_retries=MAX_RETRIES_PER_ARTICLE,
+                                        verify_upload=VERIFY_UPLOADS,
+                                        metadata_queue=metadata_queue)
                     for url in urls_to_process
                 }
 
                 for future in tqdm(as_completed(futures), total=len(futures), desc=f"Archiving {date_str}"):
                     if future.result():
                         count += 1
+
+        # Display queue status
+        queue_size = metadata_queue.qsize()
+        if queue_size > 0:
+            console.print(f"  📝 Metadata queue: {queue_size} pending updates", style="dim")
 
         # Track articles for this month
         if bucket_id not in articles_by_month:
@@ -325,7 +369,18 @@ def main():
 
         now = datetime.now()
         console.print(f"  ✅ Completed {date_str}: {count} articles processed at {now.strftime('%H:%M:%S')}", style="green")
-    
+
+    # Shutdown metadata worker gracefully
+    logger.info("Waiting for pending metadata updates to complete...")
+    metadata_queue.put(None)  # Send sentinel
+    metadata_queue.join()  # Wait for queue to drain
+    metadata_thread.join(timeout=60)  # Wait for thread exit
+
+    if metadata_thread.is_alive():
+        logger.warning("Metadata worker thread did not exit cleanly")
+    else:
+        logger.info("All metadata updates completed")
+
     # Generate and upload index.html for each month
     for bucket_id, articles_by_date in articles_by_month.items():
         if articles_by_date:
