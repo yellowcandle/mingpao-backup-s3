@@ -29,7 +29,7 @@ RUN mkdir -p /app/data /app/.cache/uv && chown -R 1000:1000 /app
 ENV IA_BUCKET=mingpao-canada-backup
 ENV MAX_WORKERS=5
 ENV START_DATE=20250101
-ENV END_DATE=20250115
+ENV END_DATE=20250228
 
 # Use a non-root user for security
 USER 1000
