@@ -17,9 +17,11 @@ from database import ArchiveDB
 
 
 def extract_article_title(content: bytes) -> str:
-    """Extract article title from HTML content."""
+    """Extract article title from HTML content (Big5-HKSCS encoded)."""
     try:
-        soup = BeautifulSoup(content, 'html.parser')
+        # Ming Pao uses Big5-HKSCS encoding
+        decoded_content = content.decode('big5hkscs', errors='replace')
+        soup = BeautifulSoup(decoded_content, 'html.parser')
         title_tag = soup.find('h3', class_='article-title')
         if title_tag:
             return title_tag.get_text().strip()
@@ -222,7 +224,7 @@ def health_check(ia_client: IAS3Client) -> bool:
     return True
 
 def main():
-    load_dotenv()
+    load_dotenv(override=True)  # Allow .env to override existing env vars
     
     access_key = os.getenv("IA_ACCESS_KEY")
     secret_key = os.getenv("IA_SECRET_KEY")

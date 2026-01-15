@@ -2,6 +2,7 @@ import requests
 import logging
 import re
 from typing import Dict, Optional, Any
+from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
 
@@ -50,9 +51,10 @@ class IAS3Client:
                     key: str, 
                     content: bytes, 
                     content_type: str = "text/html",
-                    metadata: Optional[Dict[str, str]] = None) -> bool:
+                    metadata: Optional[Dict[str, str]] = None,
+                    max_retries: int = 3) -> bool:
         """
-        Upload content to IA using S3 PUT.
+        Upload content to IA using S3 PUT with retry logic.
         
         Args:
             bucket: The IA item identifier (will be sanitized)
@@ -60,7 +62,11 @@ class IAS3Client:
             content: Raw bytes to upload
             content_type: MIME type
             metadata: Optional IA metadata headers (x-archive-meta-*)
+            max_retries: Number of retries for transient failures (500 errors)
         """
+        import time
+        import random
+        
         bucket = self.sanitize_id(bucket)
         url = f"{self.BASE_ENDPOINT}/{bucket}/{key}"
         
@@ -76,24 +82,40 @@ class IAS3Client:
             final_metadata.update(metadata)
 
         for k, v in final_metadata.items():
+            # URI-encode non-ASCII characters for HTTP headers
+            # Internet Archive supports URI-encoded UTF-8 in metadata headers
+            encoded_v = quote(str(v), safe='')
             if not k.startswith("x-archive-meta-"):
-                headers[f"x-archive-meta-{k}"] = v
+                headers[f"x-archive-meta-{k}"] = f"uri({encoded_v})"
             else:
-                headers[k] = v
+                headers[k] = f"uri({encoded_v})"
         
-        try:
-            response = requests.put(url, data=content, headers=headers, timeout=60)
-            
-            if response.status_code == 200:
-                logger.info(f"Successfully uploaded {key} to {bucket}")
-                return True
-            else:
-                logger.error(f"Failed to upload {key} to {bucket}. Status: {response.status_code}, Body: {response.text}")
-                return False
+        for attempt in range(max_retries + 1):
+            try:
+                response = requests.put(url, data=content, headers=headers, timeout=60)
                 
-        except Exception as e:
-            logger.exception(f"Exception during upload of {key} to {bucket}: {e}")
-            return False
+                if response.status_code == 200:
+                    logger.info(f"Successfully uploaded {key} to {bucket}")
+                    return True
+                elif response.status_code == 500 and attempt < max_retries:
+                    # IA returns 500 for lock contention - retry with backoff
+                    wait_time = (2 ** attempt) + random.random() * 2
+                    logger.warning(f"IA returned 500 for {key}, retrying in {wait_time:.1f}s (attempt {attempt + 1}/{max_retries + 1})")
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"Failed to upload {key} to {bucket}. Status: {response.status_code}, Body: {response.text[:500]}")
+                    return False
+                    
+            except Exception as e:
+                if attempt < max_retries:
+                    wait_time = (2 ** attempt) + random.random()
+                    logger.warning(f"Exception uploading {key}, retrying in {wait_time:.1f}s: {e}")
+                    time.sleep(wait_time)
+                else:
+                    logger.exception(f"Exception during upload of {key} to {bucket}: {e}")
+                    return False
+        
+        return False
 
     def bucket_exists(self, bucket: str) -> bool:
         """Check if an item exists by sending a HEAD request."""
@@ -105,11 +127,13 @@ class IAS3Client:
         except Exception:
             return False
     
-    def verify_file_uploaded(self, bucket: str, key: str, max_retries: int = 3) -> bool:
+    def verify_file_uploaded(self, bucket: str, key: str, max_retries: int = 5) -> bool:
         """
         Verify that a file was successfully uploaded to IA.
         Uses the public metadata API to check file presence.
         Retries with backoff in case of eventual consistency delays.
+        
+        Note: IA has eventual consistency - files may take 10-30+ seconds to appear.
         """
         import time
         bucket = self.sanitize_id(bucket)
@@ -131,14 +155,18 @@ class IAS3Client:
                     
                     # File not found yet, might be eventual consistency
                     if attempt < max_retries - 1:
-                        wait_time = 2 ** attempt  # Exponential backoff
+                        wait_time = 5 * (attempt + 1)  # 5s, 10s, 15s, 20s
                         logger.warning(f"File {key} not found in metadata yet. Retrying in {wait_time}s...")
                         time.sleep(wait_time)
                 else:
                     logger.warning(f"Failed to fetch metadata for {bucket}: HTTP {response.status_code}")
+                    if attempt < max_retries - 1:
+                        time.sleep(5)
                     
             except Exception as e:
                 logger.error(f"Error verifying {key}: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(5)
         
         logger.error(f"✗ Failed to verify {key} on IA after {max_retries} attempts")
         return False

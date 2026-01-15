@@ -25,11 +25,10 @@ COPY . .
 # Create directory for persistent logs, database, and uv cache
 RUN mkdir -p /app/data /app/.cache/uv && chown -R 1000:1000 /app
 
-# Environment variable defaults
+# Environment variable defaults (can be overridden by .env file or docker-compose)
 ENV IA_BUCKET=mingpao-canada-backup
 ENV MAX_WORKERS=5
-ENV START_DATE=20250101
-ENV END_DATE=20250228
+# Note: START_DATE and END_DATE should be set via .env file or docker-compose environment
 
 # Use a non-root user for security
 USER 1000
