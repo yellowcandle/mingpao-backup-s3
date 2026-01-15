@@ -301,8 +301,9 @@ def main():
             if match:
                 articles_by_month[bucket_id][date_str].append(match.group(1))
         
-        logger.info(f"Finished {date_str}: {count} articles processed.")
-        current_date += timedelta(days=1)
+            now = datetime.now(ZoneInfo("UTC"))
+            current_date += timedelta(days=1)
+            console.print(f"  ✅ Completed {date_str}: {count} articles processed in {now.strftime('%H:%M:%S')}", style="blue")
     
     # Generate and upload index.html for each month
     for bucket_id, articles_by_date in articles_by_month.items():
