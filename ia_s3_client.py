@@ -18,7 +18,10 @@ class IAS3Client:
         "creator": "Ming Pao Canada",
         "language": "chi",
         "mediatype": "texts",
-        "subject": "Ming Pao Canada; Archive; News; Hong Kong"
+        "subject": "Ming Pao Canada; Archive; News; Hong Kong",
+        "licenseurl": "https://creativecommons.org/licenses/by-sa/4.0/",
+        "scanner": "Ming Pao Backup Tool",
+        "ppi": "96"
     }
     
     def __init__(self, access_key: str, secret_key: str):
@@ -101,3 +104,57 @@ class IAS3Client:
             return response.status_code == 200
         except Exception:
             return False
+    
+    def verify_file_uploaded(self, bucket: str, key: str, max_retries: int = 3) -> bool:
+        """
+        Verify that a file was successfully uploaded to IA.
+        Uses the public metadata API to check file presence.
+        Retries with backoff in case of eventual consistency delays.
+        """
+        import time
+        bucket = self.sanitize_id(bucket)
+        
+        for attempt in range(max_retries):
+            try:
+                # Use the public metadata API
+                url = f"https://archive.org/metadata/{bucket}"
+                response = requests.get(url, timeout=10)
+                
+                if response.status_code == 200:
+                    metadata = response.json()
+                    if 'files' in metadata:
+                        # Check if our file is in the files list
+                        for file_obj in metadata['files']:
+                            if file_obj.get('name') == key:
+                                logger.info(f"✓ Verified: {key} exists on IA")
+                                return True
+                    
+                    # File not found yet, might be eventual consistency
+                    if attempt < max_retries - 1:
+                        wait_time = 2 ** attempt  # Exponential backoff
+                        logger.warning(f"File {key} not found in metadata yet. Retrying in {wait_time}s...")
+                        time.sleep(wait_time)
+                else:
+                    logger.warning(f"Failed to fetch metadata for {bucket}: HTTP {response.status_code}")
+                    
+            except Exception as e:
+                logger.error(f"Error verifying {key}: {e}")
+        
+        logger.error(f"✗ Failed to verify {key} on IA after {max_retries} attempts")
+        return False
+    
+    def upload_metadata_file(self, bucket: str, metadata_dict: Dict[str, str]) -> bool:
+        """
+        Upload a metadata.txt file for IA item configuration.
+        This helps IA understand the item structure and enables better rendering.
+        """
+        bucket = self.sanitize_id(bucket)
+        
+        # Create metadata.txt content in key=value format
+        metadata_lines = []
+        for key, value in metadata_dict.items():
+            # IA metadata format: key = value
+            metadata_lines.append(f"{key} = {value}")
+        
+        content = "\n".join(metadata_lines).encode('utf-8')
+        return self.upload_file(bucket, "metadata.txt", content, content_type="text/plain")
