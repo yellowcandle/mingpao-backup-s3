@@ -110,6 +110,10 @@ def archive_article(url: str, ia_client: IAS3Client, bucket: str, db: ArchiveDB,
                     logger.warning(f"Upload succeeded but verification failed for {key}")
                     return False
             
+            # Update per-file metadata with article title
+            if title:
+                ia_client.update_file_metadata(bucket, key, title)
+            
             db.record_upload(url, bucket, key, title)
             return True
     except Exception as e:

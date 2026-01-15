@@ -1,8 +1,9 @@
 import requests
 import logging
 import re
+import json
 from typing import Dict, Optional, Any
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 logger = logging.getLogger(__name__)
 
@@ -186,3 +187,105 @@ class IAS3Client:
         
         content = "\n".join(metadata_lines).encode('utf-8')
         return self.upload_file(bucket, "metadata.txt", content, content_type="text/plain")
+
+    def update_file_metadata(self, bucket: str, filename: str, title: str, max_retries: int = 3) -> bool:
+        """
+        Update per-file metadata using the IA Metadata Write API.
+        Sets the title field for a specific file in the item's _files.xml.
+        
+        Reference: https://archive.org/developers/md-write.html
+        
+        Args:
+            bucket: The IA item identifier
+            filename: The filename within the item (e.g., "20190401/HK-gaa1_r.htm")
+            title: The article title to set
+            max_retries: Number of retries for transient failures
+        """
+        import time
+        import random
+        
+        if not title:
+            return True  # Nothing to update
+        
+        bucket = self.sanitize_id(bucket)
+        url = f"https://archive.org/metadata/{bucket}"
+        
+        # JSON Patch to add/replace the title field
+        patch = {"op": "add", "path": "/title", "value": title}
+        
+        # URL-encoded form data
+        # Note: -patch value is JSON, then the whole form is URL-encoded
+        form_data = {
+            "-target": f"files/{filename}",
+            "-patch": json.dumps(patch),
+            "access": self.access_key,
+            "secret": self.secret_key,
+        }
+        
+        headers = {
+            "Content-Type": "application/x-www-form-urlencoded",
+        }
+        
+        for attempt in range(max_retries + 1):
+            try:
+                response = requests.post(url, data=form_data, headers=headers, timeout=30)
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    if result.get("success"):
+                        logger.info(f"✓ Updated metadata for {filename}: {title[:30]}...")
+                        return True
+                    else:
+                        error = result.get("error", "Unknown error")
+                        # "No changes made" is not a fatal error
+                        if "no changes" in error.lower():
+                            logger.debug(f"No metadata changes needed for {filename}")
+                            return True
+                        logger.warning(f"Metadata update failed for {filename}: {error}")
+                        # If file not found, retry after delay (eventual consistency)
+                        if "not found" in error.lower() or "does not exist" in error.lower():
+                            if attempt < max_retries:
+                                wait_time = 5 * (attempt + 1)
+                                logger.warning(f"File not found in metadata yet, waiting {wait_time}s...")
+                                time.sleep(wait_time)
+                                continue
+                elif response.status_code == 400:
+                    # 400 can mean file not found yet due to eventual consistency
+                    try:
+                        error_detail = response.json().get("error", response.text[:200])
+                    except:
+                        error_detail = response.text[:200]
+                    if attempt < max_retries:
+                        wait_time = 5 * (attempt + 1)
+                        logger.warning(f"HTTP 400 for {filename}: {error_detail}. Retrying in {wait_time}s...")
+                        time.sleep(wait_time)
+                    else:
+                        logger.error(f"Failed to update metadata for {filename}: HTTP 400 - {error_detail}")
+                        return False
+                elif response.status_code == 429:
+                    # Rate limited - wait and retry
+                    retry_after = int(response.headers.get("Retry-After", 30))
+                    if attempt < max_retries:
+                        logger.warning(f"Rate limited, waiting {retry_after}s before retry...")
+                        time.sleep(retry_after)
+                    else:
+                        logger.error(f"Rate limited for {filename}, max retries exceeded")
+                        return False
+                elif response.status_code >= 500 and attempt < max_retries:
+                    wait_time = (2 ** attempt) + random.random() * 2
+                    logger.warning(f"Server error {response.status_code} for {filename}, retrying in {wait_time:.1f}s")
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"Failed to update metadata for {filename}: HTTP {response.status_code}")
+                    return False
+                    
+            except Exception as e:
+                if attempt < max_retries:
+                    wait_time = (2 ** attempt) + random.random()
+                    logger.warning(f"Exception updating metadata for {filename}, retrying: {e}")
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"Exception updating metadata for {filename}: {e}")
+                    return False
+        
+        return False
