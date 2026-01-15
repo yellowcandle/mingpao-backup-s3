@@ -70,7 +70,7 @@ def main():
     
     access_key = os.getenv("IA_ACCESS_KEY")
     secret_key = os.getenv("IA_SECRET_KEY")
-    bucket = os.getenv("IA_BUCKET", "mingpao-canada-backup-test")
+    prefix = os.getenv("IA_IDENTIFIER_PREFIX", "mingpao-canada-hk-news")
     max_workers = int(os.getenv("MAX_WORKERS", "5"))
     
     if not access_key or not secret_key:
@@ -91,7 +91,10 @@ def main():
     current_date = start_date
     while current_date <= end_date:
         date_str = current_date.strftime("%Y%m%d")
-        logger.info(f"Processing date: {date_str}")
+        # Calculate monthly bucket ID
+        bucket_id = f"{prefix}-{current_date.year}-{current_date.month:02d}"
+        
+        logger.info(f"Processing date: {date_str} -> Bucket: {bucket_id}")
         
         urls = url_gen.get_article_urls(current_date)
         # Filter out already archived to avoid overhead
@@ -103,7 +106,7 @@ def main():
         count = 0
         if urls_to_process:
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = {executor.submit(archive_article, url, ia_client, bucket, db): url for url in urls_to_process}
+                futures = {executor.submit(archive_article, url, ia_client, bucket_id, db): url for url in urls_to_process}
                 
                 for future in tqdm(as_completed(futures), total=len(futures), desc=f"Archiving {date_str}"):
                     if future.result():

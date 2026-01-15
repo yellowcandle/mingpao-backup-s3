@@ -32,8 +32,16 @@ Edit the `.env` file and fill in your keys:
 ```env
 IA_ACCESS_KEY=your_access_key_here
 IA_SECRET_KEY=your_secret_key_here
-IA_BUCKET=your-unique-item-identifier
+IA_IDENTIFIER_PREFIX=mingpao-canada-hk-news
 ```
+
+### How it Works
+Articles are automatically organized into monthly "items" (buckets) on the Internet Archive. For example, an article from January 2025 will be stored in an item named `mingpao-canada-hk-news-2025-01`.
+
+Each monthly item contains:
+- The full HTML content of each article.
+- Metadata including the original URL, creator, and publication date.
+- Assignment to the `opensource` collection for public discovery.
 
 ### 4. Run the Archiver
 

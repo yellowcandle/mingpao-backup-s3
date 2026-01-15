@@ -1,6 +1,6 @@
 import requests
 import logging
-import hashlib
+import re
 from typing import Dict, Optional, Any
 
 logger = logging.getLogger(__name__)
@@ -13,10 +13,34 @@ class IAS3Client:
     
     BASE_ENDPOINT = "https://s3.us.archive.org"
     
+    DEFAULT_METADATA = {
+        "collection": "opensource",
+        "creator": "Ming Pao Canada",
+        "language": "chi",
+        "mediatype": "texts",
+        "subject": "Ming Pao Canada; Archive; News; Hong Kong"
+    }
+    
     def __init__(self, access_key: str, secret_key: str):
         self.access_key = access_key
         self.secret_key = secret_key
         self.auth_header = f"LOW {access_key}:{secret_key}"
+
+    @staticmethod
+    def sanitize_id(identifier: str) -> str:
+        """
+        Sanitize an identifier for Internet Archive.
+        Rules: 
+        - Lowercase alphanumeric, dashes, and dots only.
+        - Must start with alphanumeric.
+        """
+        # Lowercase
+        identifier = identifier.lower()
+        # Remove non-compliant characters
+        identifier = re.sub(r'[^a-z0-9\-\.]', '-', identifier)
+        # Ensure it starts with alphanumeric
+        identifier = re.sub(r'^[^a-z0-9]+', '', identifier)
+        return identifier
         
     def upload_file(self, 
                     bucket: str, 
@@ -28,12 +52,13 @@ class IAS3Client:
         Upload content to IA using S3 PUT.
         
         Args:
-            bucket: The IA item identifier
+            bucket: The IA item identifier (will be sanitized)
             key: The filename within the item
             content: Raw bytes to upload
             content_type: MIME type
             metadata: Optional IA metadata headers (x-archive-meta-*)
         """
+        bucket = self.sanitize_id(bucket)
         url = f"{self.BASE_ENDPOINT}/{bucket}/{key}"
         
         headers = {
@@ -42,16 +67,18 @@ class IAS3Client:
             "x-archive-auto-make-bucket": "1",
         }
         
+        # Merge with default metadata
+        final_metadata = self.DEFAULT_METADATA.copy()
         if metadata:
-            for k, v in metadata.items():
-                if not k.startswith("x-archive-meta-"):
-                    headers[f"x-archive-meta-{k}"] = v
-                else:
-                    headers[k] = v
+            final_metadata.update(metadata)
+
+        for k, v in final_metadata.items():
+            if not k.startswith("x-archive-meta-"):
+                headers[f"x-archive-meta-{k}"] = v
+            else:
+                headers[k] = v
         
         try:
-            # IA S3 requires MD5 for integrity sometimes, but it's optional for basic PUT
-            # Let's just do a simple PUT first.
             response = requests.put(url, data=content, headers=headers, timeout=60)
             
             if response.status_code == 200:
