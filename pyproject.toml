@@ -1,0 +1,15 @@
+[project]
+name = "mingpao-backup-s3"
+version = "0.1.0"
+description = "Backup Ming Pao Canada articles to Internet Archive using S3 API"
+readme = "README.md"
+authors = [
+    { name = "yellowcandle", email = "4060163+yellowcandle@users.noreply.github.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "beautifulsoup4>=4.14.3",
+    "python-dotenv>=1.2.1",
+    "requests>=2.32.5",
+    "tqdm>=4.67.1",
+]
