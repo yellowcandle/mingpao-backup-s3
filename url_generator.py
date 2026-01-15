@@ -9,7 +9,8 @@ from typing import List, Set
 logger = logging.getLogger(__name__)
 
 class MingPaoUrlGenerator:
-    BASE_URL = "https://www.mingpaocanada.com/tor"
+    # Use HTTP to avoid SSL issues with Ming Pao's unstable HTTPS
+    BASE_URL = "http://www.mingpaocanada.com/tor"
     
     HK_GA_PREFIXES = [
         "gaa", "gab", "gac", "gad", "gae", "gaf", "gba", "gbb", "gbc", "gbd", "gbe", "gbf",
@@ -38,8 +39,13 @@ class MingPaoUrlGenerator:
         
         for attempt in range(max_retries + 1):
             try:
-                response = requests.get(index_url, headers=self.headers, timeout=self.timeout)
+                # Disable redirects to avoid being sent to errorpage.html
+                response = requests.get(index_url, headers=self.headers, timeout=self.timeout, allow_redirects=False)
                 if response.status_code == 404:
+                    return []
+                # Treat redirects as "not found" since Ming Pao redirects missing pages
+                if response.status_code in (301, 302, 303, 307, 308):
+                    logger.debug(f"Index page redirected (likely missing): {index_url}")
                     return []
                 if response.status_code != 200:
                     raise requests.exceptions.RequestException(f"HTTP {response.status_code}")
