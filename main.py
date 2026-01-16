@@ -386,13 +386,40 @@ def main():
         else:
             logger.info("No files found needing metadata updates")
 
+    # Check for last processed date to optimize re-runs (smart date skipping)
+    last_processed = db.get_last_processed_date()
+    if last_processed:
+        try:
+            last_date = datetime.strptime(last_processed, "%Y%m%d")
+            if last_date >= start_date and last_date < end_date:
+                logger.info(f"🚀 Smart resume: Last processed was {last_processed}, resuming from next day...")
+                start_date = last_date + timedelta(days=1)
+        except ValueError:
+            logger.warning(f"Invalid last_processed_date: {last_processed}")
+
     current_date = start_date
     articles_by_month = {}  # Track articles by month for index generation
 
-    current_date = start_date
     total_dates_processed = 0
     
     while current_date <= end_date:
+        # Check if current month is already complete (all articles archived)
+        if current_date.day == 1:  # At start of month, check if entire month is done
+            year, month = current_date.year, current_date.month
+            archived_count = db.count_articles_by_month(year, month)
+            unique_dates = db.get_articles_by_month(year, month)
+
+            # If we have articles from most/all days of the month, likely complete
+            # Most months have 28-31 days, so check if we have > 25 unique dates
+            if unique_dates >= 25 and archived_count > 100:
+                logger.info(f"⏭️  Skipping month {year}-{month:02d} - already complete ({unique_dates} dates, {archived_count} articles)")
+                # Skip to next month
+                if month == 12:
+                    current_date = current_date.replace(year=year + 1, month=1)
+                else:
+                    current_date = current_date.replace(month=month + 1)
+                continue
+
         dates_to_process = []
         batch_end_date = current_date
         while len(dates_to_process) < 30 and batch_end_date <= end_date:
@@ -448,6 +475,9 @@ def main():
 
             now = datetime.now()
             console.print(f"  ✅ Completed {date_str}: {count} articles processed at {now.strftime('%H:%M:%S')}", style="green")
+
+            # Track this date as processed for smart resume on next run
+            db.set_last_processed_date(date_str)
 
         current_date = batch_end_date
 

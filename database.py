@@ -26,6 +26,15 @@ class ArchiveDB:
         columns = [col[1] for col in cursor.fetchall()]
         if 'title' not in columns:
             cursor.execute("ALTER TABLE uploads ADD COLUMN title TEXT")
+
+        # Create progress tracking table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS progress (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         conn.commit()
         conn.close()
 
@@ -73,3 +82,52 @@ class ArchiveDB:
         titles = {row[0]: row[1] for row in cursor.fetchall()}
         conn.close()
         return titles
+
+    def set_last_processed_date(self, date_str: str) -> None:
+        """Store the last successfully processed date (YYYYMMDD format)."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT OR REPLACE INTO progress (key, value, updated_at)
+            VALUES ('last_processed_date', ?, CURRENT_TIMESTAMP)
+        """, (date_str,))
+        conn.commit()
+        conn.close()
+
+    def get_last_processed_date(self) -> Optional[str]:
+        """Get the last successfully processed date (YYYYMMDD format), or None."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM progress WHERE key = 'last_processed_date'")
+        result = cursor.fetchone()
+        conn.close()
+        return result[0] if result else None
+
+    def count_articles_by_month(self, year: int, month: int) -> int:
+        """Count articles archived in a specific year-month."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        # Extract YYYY-MM from ia_key (format: YYYYMMDD/HK-xxx_r.htm)
+        cursor.execute("""
+            SELECT COUNT(*) FROM uploads
+            WHERE SUBSTR(ia_key, 1, 4) = ? AND SUBSTR(ia_key, 5, 2) = ?
+        """, (str(year), str(month).zfill(2)))
+        count = cursor.fetchone()[0]
+        conn.close()
+        return count
+
+    def get_articles_by_month(self, year: int, month: int) -> int:
+        """
+        Get the number of unique dates archived in a month.
+        Used to estimate if a month is likely complete.
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        # Count unique dates (YYYYMMDD) in the month
+        cursor.execute("""
+            SELECT COUNT(DISTINCT SUBSTR(ia_key, 1, 8)) FROM uploads
+            WHERE SUBSTR(ia_key, 1, 4) = ? AND SUBSTR(ia_key, 5, 2) = ?
+        """, (str(year), str(month).zfill(2)))
+        unique_dates = cursor.fetchone()[0]
+        conn.close()
+        return unique_dates
