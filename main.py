@@ -375,7 +375,7 @@ def main():
         name="MetadataWorker"
     )
     metadata_thread.start()
-    logger.info("Started background metadata worker thread")
+    logger.info(f"✓ Started background metadata worker thread (queue size: {METADATA_QUEUE_SIZE})")
 
     # Run metadata catchup if enabled
     if METADATA_CATCHUP_MODE:
@@ -397,10 +397,22 @@ def main():
         except ValueError:
             logger.warning(f"Invalid last_processed_date: {last_processed}")
 
+    # Log startup configuration
+    total_days = (end_date - start_date).days + 1
+    logger.info(f"📋 Configuration:")
+    logger.info(f"  • Prefix: {prefix}")
+    logger.info(f"  • Date range: {start_date_str} → {end_date_str} ({total_days} days)")
+    logger.info(f"  • Parallelism: {MAX_WORKERS} workers")
+    logger.info(f"  • Metadata queue: {METADATA_QUEUE_SIZE} items")
+    logger.info(f"  • Verification: {'enabled' if VERIFY_UPLOADS else 'disabled'}")
+    logger.info(f"  • Catchup mode: {'enabled' if METADATA_CATCHUP_MODE else 'disabled'}")
+
     current_date = start_date
     articles_by_month = {}  # Track articles by month for index generation
 
     total_dates_processed = 0
+    total_articles_uploaded = 0
+    total_articles_found = 0
     
     while current_date <= end_date:
         # Check if current month is already complete (all articles archived)
@@ -434,12 +446,18 @@ def main():
             bucket_id = f"{prefix}-{current_date.year}-{current_date.month:02d}"
             
             console.print(f"📅 Processing date: {date_str} → Bucket: {bucket_id}", style="blue")
-            
+
             urls = url_gen.get_article_urls(current_date)
             archived_urls = db.get_archived_urls()
             urls_to_process = [u for u in urls if u not in archived_urls]
-            
+
+            total_articles_found += len(urls)
             console.print(f"📊 Found {len(urls)} articles for {date_str} ({len(urls_to_process)} new)", style="cyan")
+
+            if len(urls_to_process) == 0:
+                logger.debug(f"  ⊘ All {len(urls)} articles already archived")
+            else:
+                logger.debug(f"  ⬇️  Need to download and upload {len(urls_to_process)} new articles")
             
             count = 0
             if urls_to_process:
@@ -455,6 +473,8 @@ def main():
                     for future in tqdm(as_completed(futures), total=len(futures), desc=f"Archiving {date_str}"):
                         if future.result():
                             count += 1
+
+            total_articles_uploaded += count
 
             # Display queue status
             queue_size = metadata_queue.qsize()
@@ -474,25 +494,38 @@ def main():
                     articles_by_month[bucket_id][date_str].append(match.group(1))
 
             now = datetime.now()
-            console.print(f"  ✅ Completed {date_str}: {count} articles processed at {now.strftime('%H:%M:%S')}", style="green")
+            success_rate = (count / len(urls_to_process) * 100) if urls_to_process else 0
+            console.print(f"  ✅ Completed {date_str}: {count}/{len(urls_to_process)} articles uploaded ({success_rate:.0f}%) at {now.strftime('%H:%M:%S')}", style="green")
 
             # Track this date as processed for smart resume on next run
             db.set_last_processed_date(date_str)
 
         current_date = batch_end_date
 
-    logger.info(f"Completed processing {total_dates_processed} dates from {start_date_str} to {end_date_str}")
+    # Final summary
+    logger.info(f"✨ Archive pass complete!")
+    logger.info(f"📊 Summary:")
+    logger.info(f"  • Dates processed: {total_dates_processed}")
+    logger.info(f"  • Articles found: {total_articles_found}")
+    logger.info(f"  • Articles uploaded: {total_articles_uploaded}")
+    if total_articles_found > 0:
+        upload_rate = (total_articles_uploaded / total_articles_found * 100)
+        logger.info(f"  • Upload success rate: {upload_rate:.1f}%")
 
     # Shutdown metadata worker gracefully
-    logger.info("Waiting for pending metadata updates to complete...")
+    logger.info("🔄 Waiting for pending metadata updates to complete...")
     metadata_queue.put(None)  # Send sentinel
     metadata_queue.join()  # Wait for queue to drain
     metadata_thread.join(timeout=60)  # Wait for thread exit
 
     if metadata_thread.is_alive():
-        logger.warning("Metadata worker thread did not exit cleanly")
+        logger.warning("⚠️  Metadata worker thread did not exit cleanly")
     else:
-        logger.info("All metadata updates completed")
+        logger.info("✓ All metadata updates completed")
+
+    # Final completion message
+    console.print("[bold green]🎉 Archive complete![/bold green]", justify="center")
+    console.print(f"[dim]Processed {total_dates_processed} dates, uploaded {total_articles_uploaded} articles[/dim]", justify="center")
 
     # Generate and upload index.html for each month
     for bucket_id, articles_by_date in articles_by_month.items():
