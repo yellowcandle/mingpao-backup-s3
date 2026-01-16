@@ -197,6 +197,76 @@ def generate_index_html(bucket_id: str, articles: Dict[str, list], titles: Optio
     
     return '\n'.join(html_parts)
 
+def catchup_metadata(ia_client: IAS3Client, db: ArchiveDB, prefix: str,
+                     start_date: datetime, end_date: datetime,
+                     metadata_queue: queue.Queue) -> int:
+    """
+    Scan IA buckets for uploaded files and queue any with missing metadata for processing.
+    Uses START_DATE and END_DATE to determine which buckets to scan (YYYY-MM format).
+
+    Returns the number of files queued for metadata updates.
+    """
+    queued_count = 0
+
+    # Generate list of buckets to check based on date range
+    current = start_date.replace(day=1)  # Start from first of month
+    buckets_to_check = set()
+
+    while current <= end_date:
+        bucket_id = f"{prefix}-{current.year}-{current.month:02d}"
+        buckets_to_check.add(bucket_id)
+        # Move to next month
+        if current.month == 12:
+            current = current.replace(year=current.year + 1, month=1)
+        else:
+            current = current.replace(month=current.month + 1)
+
+    logger.info(f"Scanning {len(buckets_to_check)} buckets for files with missing metadata...")
+
+    for bucket_id in sorted(buckets_to_check):
+        try:
+            # Query IA metadata API to get all files in the bucket
+            url = f"https://archive.org/metadata/{bucket_id}"
+            response = requests.get(url, timeout=30)
+
+            if response.status_code != 200:
+                logger.warning(f"Could not fetch metadata for bucket {bucket_id}: HTTP {response.status_code}")
+                continue
+
+            metadata = response.json()
+            if 'files' not in metadata:
+                logger.debug(f"No files found in bucket {bucket_id}")
+                continue
+
+            logger.info(f"Found {len(metadata['files'])} files in {bucket_id}")
+
+            for file_obj in metadata['files']:
+                filename = file_obj.get('name', '')
+                # Skip metadata.txt and index.html
+                if filename in ('metadata.txt', 'index.html') or not filename:
+                    continue
+
+                # Check if this file has a title in our database
+                title = db.get_title_by_key(filename)
+
+                if title:
+                    # Queue for metadata update if title exists
+                    try:
+                        metadata_queue.put((bucket_id, filename, title), block=False)
+                        queued_count += 1
+                        logger.debug(f"Queued {filename} for metadata update: {title[:30]}...")
+                    except queue.Full:
+                        logger.warning(f"Metadata queue full during catchup, stopping scan")
+                        return queued_count
+                else:
+                    logger.debug(f"Skipping {filename} - no title in database")
+
+        except Exception as e:
+            logger.error(f"Error scanning bucket {bucket_id} for catchup: {e}")
+            continue
+
+    return queued_count
+
 def health_check(ia_client: IAS3Client) -> bool:
     """
     Perform health checks before starting the backup:
@@ -274,6 +344,8 @@ def main():
     MAX_WORKERS = int(os.getenv("MAX_WORKERS", "2"))  # Default: 2 workers for parallel processing
     MAX_RETRIES_PER_ARTICLE = int(os.getenv("MAX_RETRIES_PER_ARTICLE", "3"))  # Default: 3 retries per article
     VERIFY_UPLOADS = os.getenv("VERIFY_UPLOADS", "false").lower() == "true"  # Default: don't verify (faster)
+    METADATA_QUEUE_SIZE = int(os.getenv("METADATA_QUEUE_SIZE", "200"))  # Default: 200 items
+    METADATA_CATCHUP_MODE = os.getenv("METADATA_CATCHUP_MODE", "false").lower() == "true"  # Default: disabled
 
     # Metadata worker function for background processing
     def metadata_worker(q, ia_client):
@@ -292,8 +364,8 @@ def main():
             finally:
                 q.task_done()
 
-    # Create metadata queue (bounded to 200 items)
-    metadata_queue = queue.Queue(maxsize=200)
+    # Create metadata queue (bounded to configured size)
+    metadata_queue = queue.Queue(maxsize=METADATA_QUEUE_SIZE)
 
     # Start background metadata worker thread
     metadata_thread = threading.Thread(
@@ -304,6 +376,15 @@ def main():
     )
     metadata_thread.start()
     logger.info("Started background metadata worker thread")
+
+    # Run metadata catchup if enabled
+    if METADATA_CATCHUP_MODE:
+        logger.info("🔄 Metadata catchup mode enabled - scanning for files with missing metadata...")
+        catchup_count = catchup_metadata(ia_client, db, prefix, start_date, end_date, metadata_queue)
+        if catchup_count > 0:
+            logger.info(f"✓ Queued {catchup_count} files for metadata updates")
+        else:
+            logger.info("No files found needing metadata updates")
 
     current_date = start_date
     articles_by_month = {}  # Track articles by month for index generation
