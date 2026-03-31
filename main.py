@@ -542,4 +542,11 @@ def main():
             ia_client.upload_file(bucket_id, "index.html", index_content, content_type="text/html")
 
 if __name__ == "__main__":
-    main()
+    load_dotenv()
+    backup_mode = os.getenv("BACKUP_MODE", "mingpao").lower()
+
+    if backup_mode == "yahoo":
+        from yahoo_backup import run_yahoo_backup
+        run_yahoo_backup()
+    else:
+        main()
